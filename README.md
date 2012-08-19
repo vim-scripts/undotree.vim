@@ -1,5 +1,4 @@
-### [Link to Vim.org]
-(....)
+### [Link to Vim.org](http://www.vim.org/scripts/script.php?script_id=4177)
 
 ### Description
 Vim 7.0 added a new feature named **Undo branches**. Basically it's a kind of ability to go back to the text after any change, even if they were undone. Vim stores undo history in a tree which you can browse and manipulate through a bunch of commands. But that was not enough straightforward and a bit hard to use. You may use `:help new-undo-branches` or `:help undo-tree` to get more detailed help.  
@@ -17,8 +16,10 @@ Now this plug-in will free you from those commands and bring back the power of u
  1. TODO: Hotkey support.
  1. TODO: Diff support.
 
+### [Download](https://github.com/mbbill/undotree/tags)
+
 ### Install
- 1. Unpack all scripts into *plugin* directory and that's all. There is no additional dependency.
+ 1. Unpack all scripts into *plugin* directory and that's all. This script is written purely in Vim script with no additional dependency.
 
 ### Usage
  1. Use `:UndotreeToggle` to toggle the undo-tree panel. You may want to map this command to whatever hotkey by adding the following line to your vimrc, take F5 for example.
@@ -28,7 +29,9 @@ Now this plug-in will free you from those commands and bring back the power of u
  1. Then you can try to do some modification, and the undo tree will automatically updated afterwards.
  1. There are a bunch of hotkeys provided by vim to switch between the changes in history, like `u`, `<ctrl-r>`, `g+`, `g-` as well as the `:earlier` and `:later` commands.
  1. Persistent undo
-    * It is highly recommend to enable the persistent undo. If you don't like your working directory be messed up with the undo file everywhere, add the following line to your *vimrc* in order to make them stored together.
+    * It is highly recommend to enable the persistent undo. If you don't like your working directory be messed up with the undo file everywhere.
+
+Add the following line to your *vimrc* in order to make them stored together.
 
     if has("persistent_undo")
         set undodir = '/path/to/what/you/want/'
@@ -46,4 +49,4 @@ Now this plug-in will free you from those commands and bring back the power of u
 **BSD**
 
 ### Author
-Ming Bai <mbbill AT gmail DOT COM>
+Ming Bai  `<mbbill AT gmail DOT COM>`
