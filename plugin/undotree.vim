@@ -58,6 +58,14 @@ function! s:gettime(time)
     endif
 endfunction
 
+" Exec without autocommands
+function! s:exec(cmd)
+    let ei_bak= &eventignore
+    set eventignore=all
+    silent exe a:cmd
+    let &eventignore = ei_bak
+endfunction
+
 "=================================================
 " Template object, like a class.
 let s:undotree = {}
@@ -82,12 +90,12 @@ endfunction
 
 function! s:undotree.BindKey()
     for i in s:keymap
-        silent! exec 'nnoremap <silent> <buffer> '.i[1].' :UndotreeAction '.i[0].'<cr>'
+        silent exec 'nnoremap <silent> <buffer> '.i[1].' :UndotreeAction '.i[0].'<cr>'
     endfor
 endfunction
 
 function! s:undotree.Action(action)
-    if !self.IsVisible()
+    if !self.IsVisible() || bufname("%") != self.bufname
         "echoerr "Fatal: window does not exists."
         return
     endif
@@ -95,22 +103,23 @@ function! s:undotree.Action(action)
         echoerr "Fatal: Action does not exists!"
         return
     endif
-    silent! exec 'call self.Action'.a:action.'()'
+    silent exec 'call self.Action'.a:action.'()'
 endfunction
 
 function! s:undotree.ActionHelp()
     let self.showHelp = !self.showHelp
     call self.Draw()
-    call self.SetFocus() " keep focus.
 endfunction
 
-" Helper function, do action in target window.
+" Helper function, do action in target window, and then update itself.
 function! s:undotree.ActionInTarget(cmd)
     if !self.SetTargetFocus()
         return
     endif
-    silent! exec a:cmd
+    call s:exec(a:cmd)
+    call self.UpdateTarget()
     call self.SetFocus()
+    call self.Update()
 endfunction
 
 function! s:undotree.ActionEnter()
@@ -129,7 +138,7 @@ function! s:undotree.ActionUndo()
 endfunction
 
 function! s:undotree.ActionRedo()
-    call self.ActionInTarget('redo')
+    call self.ActionInTarget("redo")
 endfunction
 
 function! s:undotree.ActionGodown()
@@ -162,7 +171,8 @@ function! s:undotree.SetFocus()
         echoerr "Fatal: undotree window does not exist!"
         return
     else
-        exec winnr . " wincmd w"
+        " wincmd would cause cursor outside window.
+        call s:exec("norm! ".winnr."\<c-w>\<c-w>")
         return
     endif
 endfunction
@@ -173,7 +183,7 @@ function! s:undotree.SetTargetFocus()
     if winnr == -1
         return 0
     else
-        exec winnr . " wincmd w"
+        call s:exec("norm! ".winnr."\<c-w>\<c-w>")
         return 1
     endif
 endfunction
@@ -181,7 +191,7 @@ endfunction
 function! s:undotree.RestoreFocus()
     let previousWinnr = winnr("#")
     if previousWinnr > 0
-        exec previousWinnr . "wincmd w"
+        call s:exec("norm! ".previousWinnr."\<c-w>\<c-w>")
     endif
 endfunction
 
@@ -189,11 +199,14 @@ function! s:undotree.Show()
     if self.IsVisible()
         return
     endif
+    " store info for the first update.
+    call self.UpdateTarget()
+    " Create undotree window.
     let cmd = self.location . " " .
                 \self.mode . " " .
                 \self.size . " " .
                 \' new ' . self.bufname
-    silent! exec cmd
+    call s:exec("silent ".cmd)
     call self.SetFocus()
     setlocal winfixwidth
     setlocal noswapfile
@@ -208,6 +221,7 @@ function! s:undotree.Show()
     setlocal nomodifiable
     setfiletype undotree
     call s:undotree.BindKey()
+    call self.Update()
     call self.RestoreFocus()
 endfunction
 
@@ -215,8 +229,7 @@ function! s:undotree.Hide()
     if !self.IsVisible()
         return
     endif
-    let winnr = bufwinnr(self.bufname)
-    exec winnr . " wincmd w"
+    call self.SetFocus()
     quit
     " quit this window will restore focus to the previous window automatically.
 endfunction
@@ -229,18 +242,22 @@ function! s:undotree.Toggle()
     endif
 endfunction
 
-function! s:undotree.Update(bufname, rawtree)
+function! s:undotree.Update()
     if !self.IsVisible()
         return
     endif
-    let self.targetBufname = a:bufname
-    let self.rawtree = a:rawtree
     let self.currentseq = -1
     let self.nodelist = {}
     let self.currentIndex = -1
     call self.ConvertInput()
     call self.Render()
     call self.Draw()
+endfunction
+
+" execute this in target window.
+function! s:undotree.UpdateTarget()
+    let self.targetBufname = bufname("%") "current buffer
+    let self.rawtree = undotree()
 endfunction
 
 function! s:undotree.AppendHelp()
@@ -277,31 +294,30 @@ function! s:undotree.Screen2Index(line)
     return index
 endfunction
 
+" Current window must be undotree.
 function! s:undotree.Draw()
-    call self.SetFocus()
-
     " remember the current cursor position.
     let linePos = line('.') "Line number of cursor
     normal! H
     let topPos = line('.') "Line number of the first line in screen.
 
     setlocal modifiable
-    silent normal! ggdG
+    " Delete text into blackhole register.
+    call s:exec('1,$ d _')
     call append(0,self.asciitree)
 
     call self.AppendHelp()
 
     "remove the last empty line
-    silent normal! Gdd
+    call s:exec('$d _')
 
     " restore previous cursor position.
-    exec "normal! " . topPos . "G"
+    call s:exec("normal! " . topPos . "G")
     normal! zt
-    exec "normal! " . linePos . "G"
+    call s:exec("normal! " . linePos . "G")
 
-    exec "normal! " . self.Index2Screen(self.currentIndex) . "G"
+    call s:exec("normal! " . self.Index2Screen(self.currentIndex) . "G")
     setlocal nomodifiable
-    call self.RestoreFocus()
 endfunction
 
 " tree node class
@@ -528,12 +544,17 @@ function! s:undotree.Render()
                     let newline = newline."/ "
                 endif
             endfor
-            " split P to E+P if elements in p > 2
             call remove(slots,index)
             if len(node) == 2
-                call insert(slots,node[0],index)
-                call insert(slots,node[1],index)
+                if node[0].seq > node[1].seq
+                    call insert(slots,node[0],index)
+                    call insert(slots,node[1],index)
+                else
+                    call insert(slots,node[1],index)
+                    call insert(slots,node[0],index)
+                endif
             endif
+            " split P to E+P if elements in p > 2
             if len(node) > 2
                 call insert(slots,node[0],index)
                 call remove(node,0)
@@ -560,9 +581,13 @@ function! s:undotreeUpdate()
     if &bt != '' "it's nor a normal buffer, could be help, quickfix, etc.
         return
     endif
-    let bufname = bufname("%") "current buffer
-    let rawtree = undotree()
-    call t:undotree.Update(bufname, rawtree)
+    if mode() != 'n' "not in normal mode, return.
+        return
+    endif
+    call t:undotree.UpdateTarget()
+    call t:undotree.SetFocus()
+    call t:undotree.Update()
+    call t:undotree.RestoreFocus()
 endfunction
 
 function! s:undotreeToggle()
