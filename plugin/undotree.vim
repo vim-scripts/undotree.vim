@@ -4,29 +4,45 @@
 " Author: Ming Bai <mbbill@gmail.com>
 " License: BSD
 
+" TODO remember split size.
+" TODO status line.
+" TODO Diff between 2 specific revisions.
+" TODO clear undo history.
+
 " At least version 7.0 is needed for undo branches.
 if v:version < 700
      finish
 endif
 
-" Options
-if !exists('g:undotreeSplitLocation')
-    let g:undotreeSplitLocation = 'topleft'
+" split window location, could also be topright
+if !exists('g:undotree_SplitLocation')
+    let g:undotree_SplitLocation = 'topleft'
 endif
 
-if !exists('g:undotreeSplitMode')
-    let g:undotreeSplitMode = 'vertical'
+" undotree window width
+if !exists('g:undotree_SplitWidth')
+    let g:undotree_SplitWidth = 28
 endif
 
-" TODO remember split size.
-if !exists('g:undotreeSplitSize')
-    let g:undotreeSplitSize = 28
+" if set, let undotree window get focus after being opened, otherwise
+" focus will stay in current window.
+if !exists('g:undotree_SetFocusWhenToggle')
+    let g:undotree_SetFocusWhenToggle = 0
 endif
 
+" diff window height
+if !exists('g:undotree_diffpanelHeight')
+    let g:undotree_diffpanelHeight = 10
+endif
+
+" auto open diff window
+if !exists('g:undotree_diffAutoOpen')
+    let g:undotree_diffAutoOpen = 1
+endif
 
 "=================================================
 " Golbal buf counter.
-let s:undobufNr = 0
+let s:cntr = 0
 
 " Help text
 let s:helpmore = ['" Undotree quick help',
@@ -36,13 +52,14 @@ let s:helpless = ['" Press ? for help.']
 " Keymap
 let s:keymap = []
 " action, key, help.
-let s:keymap += [['Enter','<cr>','Revert to current state']]
-let s:keymap += [['Enter','<2-LeftMouse>','Revert to current state']]
-let s:keymap += [['Godown','J','Revert to previous state']]
-let s:keymap += [['Goup','K','Revert to next state']]
-let s:keymap += [['Undo','u','Undo']]
-let s:keymap += [['Redo','<c-r>','Redo']]
 let s:keymap += [['Help','?','Toggle quick help']]
+let s:keymap += [['DiffToggle','D','Toggle diff panel']]
+let s:keymap += [['Goup','K','Revert to next state']]
+let s:keymap += [['Godown','J','Revert to previous state']]
+let s:keymap += [['Redo','<c-r>','Redo']]
+let s:keymap += [['Undo','u','Undo']]
+let s:keymap += [['Enter','<2-LeftMouse>','Revert to current state']]
+let s:keymap += [['Enter','<cr>','Revert to current state']]
 
 function! s:new(obj)
     let newobj = deepcopy(a:obj)
@@ -73,13 +90,14 @@ function! s:exec(cmd)
 endfunction
 
 let s:debug = 0
-let s:debugfile = '~/undotree_debug.log'
-function! s:debugon()
+let s:debugfile = $HOME.'/undotree_debug.log'
+" If debug file exists, enable debug output.
+if filewritable(s:debugfile)
     let s:debug = 1
     exec 'redir >> '. s:debugfile
     silent echo "=======================================\n"
     redir END
-endfunction
+endif
 
 function! s:log(msg)
     if s:debug
@@ -90,37 +108,106 @@ function! s:log(msg)
 endfunction
 
 "=================================================
-" Template object, like a class.
-let s:undotree = {}
+"Base class for panels.
+let s:panel = {}
+
+function! s:panel.Init()
+    let self.bufname = "invalid"
+endfunction
+
+function! s:panel.SetFocus()
+    let winnr = bufwinnr(self.bufname)
+    call s:log("SetFocus() winnr:".winnr." bufname:".self.bufname)
+    " already focused.
+    if winnr == winnr()
+        return
+    endif
+    if winnr == -1
+        echoerr "Fatal: window does not exist!"
+        return
+    endif
+    " wincmd would cause cursor outside window.
+    call s:exec("norm! ".winnr."\<c-w>\<c-w>")
+endfunction
+
+function! s:panel.IsVisible()
+    if bufwinnr(self.bufname) != -1
+        return 1
+    else
+        return 0
+    endif
+endfunction
+
+function! s:panel.Hide()
+    call s:log(self.bufname." Hide()")
+    if !self.IsVisible()
+        return
+    endif
+    call self.SetFocus()
+    call s:exec("quit")
+endfunction
+
+"=================================================
+" undotree panel class.
+" extended from panel.
+"
+
+" {rawtree}
+"     |
+"     | ConvertInput()               {seq2index}--> [seq1:index1]
+"     v                                             [seq2:index2] ---+
+"  {tree}                                               ...          |
+"     |                                    [asciimeta]               |
+"     | Render()                                |                    |
+"     v                                         v                    |
+" [asciitree] --> [" * | SEQ DDMMYY "] <==> [node1{seq,time,..}]     |
+"                 [" |/             "]      [node2{seq,time,..}] <---+
+"                         ...                       ...
+
+let s:undotree = s:new(s:panel)
 
 function! s:undotree.Init()
-    let self.bufname = "undotree_".s:undobufNr
-    let self.location = g:undotreeSplitLocation
-    let self.mode = g:undotreeSplitMode
-    let self.size = g:undotreeSplitSize
+    let self.bufname = "undotree_".s:cntr
+    " Increase to make it unique.
+    let s:cntr = s:cntr + 1
+    let self.width = g:undotree_SplitWidth
     let self.targetBufname = ''
     let self.rawtree = {}  "data passed from undotree()
     let self.tree = {}     "data converted to internal format.
-    let self.nodelist = {} "stores an ordered list of items points to self.tree
-    let self.currentseq = -1  "current node is the latest.
+    let self.seq_last = -1
+
+    " seqs
+    let self.seq_cur = -1
+    let self.seq_curhead = -1
+    let self.seq_newhead = -1
+
+    "backup, for mark
+    let self.seq_cur_bak = -1
+    let self.seq_curhead_bak = -1
+    let self.seq_newhead_bak = -1
+
     let self.asciitree = []     "output data.
     let self.asciimeta = []     "meta data behind ascii tree.
-    let self.currentIndex = -1 "line of the current node in ascii tree.
+    let self.seq2index = {}     "table used to convert seq to index.
     let self.showHelp = 0
-    " Increase to make it unique.
-    let s:undobufNr = s:undobufNr + 1
 endfunction
 
 function! s:undotree.BindKey()
     for i in s:keymap
-        silent exec 'nnoremap <silent> <buffer> '.i[1].' :call UndotreeAction("'.i[0].'")<cr>'
+        silent exec 'nnoremap <silent> <script> <buffer> '.i[1].' :call <sid>undotreeAction("'.i[0].'")<cr>'
     endfor
 endfunction
 
+function! s:undotree.BindAu()
+    " Auto exit if it's the last window
+    au WinEnter <buffer> if !t:undotree.IsTargetVisible() |
+                \call t:undotree.Hide() | call t:diffpanel.Hide() | endif
+endfunction
+
 function! s:undotree.Action(action)
-    call s:log("Action() ".a:action)
+    call s:log("undotree.Action() ".a:action)
     if !self.IsVisible() || bufname("%") != self.bufname
-        "echoerr "Fatal: window does not exists."
+        echoerr "Fatal: window does not exists."
         return
     endif
     if !has_key(self,'Action'.a:action)
@@ -133,6 +220,7 @@ endfunction
 function! s:undotree.ActionHelp()
     let self.showHelp = !self.showHelp
     call self.Draw()
+    call self.MarkSeqs()
 endfunction
 
 " Helper function, do action in target window, and then update itself.
@@ -141,9 +229,9 @@ function! s:undotree.ActionInTarget(cmd)
         return
     endif
     call s:exec(a:cmd)
-    call self.UpdateTarget()
-    call self.SetFocus()
     call self.Update()
+    " Update not always set current focus.
+    call self.SetFocus()
 endfunction
 
 function! s:undotree.ActionEnter()
@@ -151,7 +239,12 @@ function! s:undotree.ActionEnter()
     if index < 0
         return
     endif
-    if (self.asciimeta[index].seq) == -1
+    let seq = self.asciimeta[index].seq
+    if seq == -1
+        return
+    endif
+    if seq == 0
+        call self.ActionInTarget('norm 9999u')
         return
     endif
     call self.ActionInTarget('u '.self.asciimeta[index].seq)
@@ -173,12 +266,29 @@ function! s:undotree.ActionGoup()
     call self.ActionInTarget('later')
 endfunction
 
-function! s:undotree.IsVisible()
-    if bufwinnr(self.bufname) != -1
-        return 1
-    else
-        return 0
+function! s:undotree.ActionDiffToggle()
+    call t:diffpanel.Toggle()
+    if t:diffpanel.IsVisible()
+        call t:diffpanel.Update(self.seq_cur,self.targetBufname)
     endif
+endfunction
+
+function! s:undotree.UpdateDiff()
+    call s:log("undotree.UpdateDiff()")
+    if !t:diffpanel.IsVisible()
+        return
+    endif
+    let index = self.Screen2Index(line('.'))
+    if index < 0
+        return
+    endif
+    " -1: invalid node.
+    "  0: no parent node.
+    " >0: assume that seq>0 always has parent.
+    if (self.asciimeta[index].seq) < 0
+        return
+    endif
+    call t:diffpanel.Update(self.asciimeta[index].seq,self.targetBufname)
 endfunction
 
 function! s:undotree.IsTargetVisible()
@@ -189,23 +299,10 @@ function! s:undotree.IsTargetVisible()
     endif
 endfunction
 
-function! s:undotree.SetFocus()
-    let winnr = bufwinnr(self.bufname)
-    call s:log("SetFocus() winnr:".winnr." bufname:".self.bufname)
-    if winnr == -1
-        echoerr "Fatal: undotree window does not exist!"
-        return
-    else
-        " wincmd would cause cursor outside window.
-        call s:exec("norm! ".winnr."\<c-w>\<c-w>")
-        return
-    endif
-endfunction
-
 " May fail due to target window closed.
 function! s:undotree.SetTargetFocus()
     let winnr = bufwinnr(self.targetBufname)
-    call s:log("SetTargetFocus() winnr:".winnr." targetBufname:".self.targetBufname)
+    call s:log("undotree.SetTargetFocus() winnr:".winnr." targetBufname:".self.targetBufname)
     if winnr == -1
         return 0
     else
@@ -214,26 +311,30 @@ function! s:undotree.SetTargetFocus()
     endif
 endfunction
 
-function! s:undotree.RestoreFocus()
-    let previousWinnr = winnr("#")
-    call s:log("RestoreFocus() previousWinnr:".previousWinnr)
-    if previousWinnr > 0
-        call s:exec("norm! ".previousWinnr."\<c-w>\<c-w>")
+function! s:undotree.Toggle()
+    call s:log(self.bufname." Toggle()")
+    if self.IsVisible()
+        call self.Hide()
+        call t:diffpanel.Hide()
+    else
+        call self.Show()
     endif
 endfunction
 
 function! s:undotree.Show()
-    call s:log("Show()")
+    call s:log("undotree.Show()")
     if self.IsVisible()
         return
     endif
+
     " store info for the first update.
-    call self.UpdateTarget()
+    let self.targetBufname = bufname('%')
+    let self.rawtree = undotree()
+    let self.seq_last = self.rawtree.seq_last
+
     " Create undotree window.
-    let cmd = self.location . " " .
-                \self.mode . " " .
-                \self.size . " " .
-                \' new ' . self.bufname
+    let cmd = g:undotree_SplitLocation . " vertical" .
+                \self.width . ' new ' . self.bufname
     call s:exec("silent ".cmd)
     call self.SetFocus()
     setlocal winfixwidth
@@ -248,48 +349,74 @@ function! s:undotree.Show()
     setlocal cursorline
     setlocal nomodifiable
     setfiletype undotree
-    call s:undotree.BindKey()
-    " why refresh twice here?
-    call self.Update()
-    call self.RestoreFocus()
-endfunction
 
-function! s:undotree.Hide()
-    call s:log("Hide()")
-    if !self.IsVisible()
-        return
-    endif
-    call self.SetFocus()
-    call s:exec("quit")
-    " quit this window will restore focus to the previous window automatically.
-endfunction
+    call self.BindKey()
+    call self.BindAu()
 
-function! s:undotree.Toggle()
-    call s:log("Toggle()")
-    if self.IsVisible()
-        call self.Hide()
-    else
-        call self.Show()
-    endif
-endfunction
-
-function! s:undotree.Update()
-    call s:log("Update()")
-    if !self.IsVisible()
-        return
-    endif
-    let self.currentseq = -1
-    let self.nodelist = {}
-    let self.currentIndex = -1
-    call self.ConvertInput()
+    call self.ConvertInput(1)
     call self.Render()
     call self.Draw()
+    call self.MarkSeqs()
+    if g:undotree_diffAutoOpen
+        call t:diffpanel.Show()
+        call self.UpdateDiff()
+    endif
+    if !g:undotree_SetFocusWhenToggle
+        call self.SetTargetFocus()
+    endif
 endfunction
 
-" execute this in target window.
-function! s:undotree.UpdateTarget()
-    let self.targetBufname = bufname("%") "current buffer
+" called outside undotree window
+function! s:undotree.Update()
+    if &bt != '' "it's nor a normal buffer, could be help, quickfix, etc.
+        return
+    endif
+    if &modifiable == 0 "no modifiable buffer.
+        return
+    endif
+    if mode() != 'n' "not in normal mode, return.
+        return
+    endif
+    if !self.IsVisible()
+        return
+    endif
+    "update undotree,set focus
+    if self.targetBufname == bufname('%')
+        let newrawtree = undotree()
+        if self.rawtree == newrawtree
+            return
+        endif
+
+        " same buffer, but seq changed.
+        if newrawtree.seq_last == self.seq_last
+            call s:log("undotree.Update() update seqs")
+            let self.rawtree = newrawtree
+            call self.ConvertInput(0) "only update seqs.
+            if (self.seq_cur == self.seq_cur_bak) &&
+                        \(self.seq_curhead == self.seq_curhead_bak)&&
+                        \(self.seq_newhead == self.seq_newhead_bak)
+                return
+            endif
+            call self.SetFocus()
+            call self.MarkSeqs()
+            call self.UpdateDiff()
+            return
+        endif
+    endif
+    call s:log("undotree.Update() update whole tree")
+
+    let self.targetBufname = bufname('%')
     let self.rawtree = undotree()
+    let self.seq_last = self.rawtree.seq_last
+    let self.seq_cur = -1
+    let self.seq_curhead = -1
+    let self.seq_newhead = -1
+    call self.ConvertInput(1) "update all.
+    call self.Render()
+    call self.SetFocus()
+    call self.Draw()
+    call self.MarkSeqs()
+    call self.UpdateDiff()
 endfunction
 
 function! s:undotree.AppendHelp()
@@ -306,7 +433,7 @@ endfunction
 
 function! s:undotree.Index2Screen(index)
     " calculate line number according to the help text.
-    " index starts from zero and lineNr starts from 1.
+    " index starts from zero and lineNr starts from 1
     if self.showHelp
         " 2 means 1 empty line + 1 index padding (index starts from zero)
         let lineNr = a:index + len(s:keymap) + len(s:helpmore) + 2
@@ -329,9 +456,9 @@ endfunction
 " Current window must be undotree.
 function! s:undotree.Draw()
     " remember the current cursor position.
-    let linePos = line('.') "Line number of cursor
+    let cursorPos = getpos('.') "position of cursor
     call s:exec('normal! H')
-    let topPos = line('.') "Line number of the first line in screen.
+    let topPos = getpos('.') "position of the first line in screen.
 
     setlocal modifiable
     " Delete text into blackhole register.
@@ -344,11 +471,54 @@ function! s:undotree.Draw()
     call s:exec('$d _')
 
     " restore previous cursor position.
-    call s:exec("normal! " . topPos . "G")
+    call setpos('.',topPos)
     normal! zt
-    call s:exec("normal! " . linePos . "G")
+    call setpos('.',cursorPos)
 
-    call s:exec("normal! " . self.Index2Screen(self.currentIndex) . "G")
+    setlocal nomodifiable
+endfunction
+
+function! s:undotree.MarkSeqs()
+    call s:log("bak(cur,curhead,newhead): ".
+                \self.seq_cur_bak.' '.
+                \self.seq_curhead_bak.' '.
+                \self.seq_newhead_bak)
+    call s:log("(cur,curhead,newhead): ".
+                \self.seq_cur.' '.
+                \self.seq_curhead.' '.
+                \self.seq_newhead)
+    setlocal modifiable
+    " reset bak seq lines.
+    if self.seq_cur_bak != -1
+        let index = self.seq2index[self.seq_cur_bak]
+        call setline(self.Index2Screen(index),self.asciitree[index])
+    endif
+    if self.seq_curhead_bak != -1
+        let index = self.seq2index[self.seq_curhead_bak]
+        call setline(self.Index2Screen(index),self.asciitree[index])
+    endif
+    if self.seq_newhead_bak != -1
+        let index = self.seq2index[self.seq_newhead_bak]
+        call setline(self.Index2Screen(index),self.asciitree[index])
+    endif
+    " mark new seqs.
+    if self.seq_cur != -1
+        let lineNr = self.Index2Screen(self.seq2index[self.seq_cur])
+        call setline(lineNr,substitute(getline(lineNr),
+                    \' \(\d\+\) ','>\1<',''))
+        " move cursor to that line.
+        call s:exec("normal! " . lineNr . "G")
+    endif
+    if self.seq_curhead != -1
+        let lineNr = self.Index2Screen(self.seq2index[self.seq_curhead])
+        call setline(lineNr,substitute(getline(lineNr),
+                    \' \(\d\+\) ','{\1}',''))
+    endif
+    if self.seq_newhead != -1
+        let lineNr = self.Index2Screen(self.seq2index[self.seq_newhead])
+        call setline(lineNr,substitute(getline(lineNr),
+                    \' \(\d\+\) ','[\1]',''))
+    endif
     setlocal nomodifiable
 endfunction
 
@@ -358,10 +528,7 @@ let s:node = {}
 function! s:node.Init()
     let self.seq = -1
     let self.p = []
-    let self.newhead = 0
-    let self.curhead = 0
     let self.time = -1
-    let self.curpos = 0 " =1 if this node is the current one
 endfunction
 
 function! s:undotree._parseNode(in,out)
@@ -378,16 +545,12 @@ function! s:undotree._parseNode(in,out)
         let newnode.seq = i.seq
         let newnode.time = i.time
         if has_key(i,'newhead')
-            let newnode.newhead = i.newhead
+            let self.seq_newhead = i.seq
         endif
         if has_key(i,'curhead')
-            let newnode.curhead = i.curhead
-            let curnode.curpos = 1
-            " See 'Note' below.
-            let self.currentseq = curnode.seq
+            let self.seq_curhead = i.seq
+            let self.seq_cur = curnode.seq
         endif
-        "endif
-        let self.nodelist[newnode.seq] = newnode
         call extend(curnode.p,[newnode])
         let curnode = newnode
     endfor
@@ -396,24 +559,33 @@ endfunction
 "Sample:
 "let s:test={'seq_last': 4, 'entries': [{'seq': 3, 'alt': [{'seq': 1, 'time': 1345131443}, {'seq': 2, 'time': 1345131445}], 'time': 1345131490}, {'seq': 4, 'time': 1345131492, 'newhead': 1}], 'time_cur': 1345131493, 'save_last': 0, 'synced': 0, 'save_cur': 0, 'seq_cur': 4}
 
-function! s:undotree.ConvertInput()
+" updatetree: 0: no update, just assign seqs;  1: update and assign seqs.
+function! s:undotree.ConvertInput(updatetree)
+    "reset seqs
+    let self.seq_cur_bak = self.seq_cur
+    let self.seq_curhead_bak = self.seq_curhead
+    let self.seq_newhead_bak = self.seq_newhead
+
+    let self.seq_cur = -1
+    let self.seq_curhead = -1
+    let self.seq_newhead = -1
+
     "Generate root node
-    let self.tree = s:new(s:node)
-    let self.tree.seq = 0
-    let self.tree.time = 0
+    let root = s:new(s:node)
+    let root.seq = 0
+    let root.time = 0
 
-    "Add root node to list, we need a sorted list to calculate current node index.
-    let self.nodelist[self.tree.seq] = self.tree
-
-    call self._parseNode(self.rawtree.entries,self.tree)
+    call self._parseNode(self.rawtree.entries,root)
 
     " Note: Normally, the current node should be the one that seq_cur points to,
     " but in fact it's not. May be bug, bug anyway I found a workaround:
     " first try to find the parent node of 'curhead', if not found, then use
     " seq_cur.
-    if self.currentseq == -1
-        let self.currentseq = self.rawtree.seq_cur
-        let self.nodelist[self.currentseq].curpos = 1
+    if self.seq_cur == -1
+        let self.seq_cur = self.rawtree.seq_cur
+    endif
+    if a:updatetree
+        let self.tree = root
     endif
 endfunction
 
@@ -458,9 +630,9 @@ function! s:undotree.Render()
     " let tree = deepcopy(self.tree)
     let tree = self.tree
     let slots = [tree]
-    "let curr_seq = 0
     let out = []
     let outmeta = []
+    let seq2index = {}
     let TYPE_E = type({})
     let TYPE_P = type([])
     let TYPE_X = type('x')
@@ -522,6 +694,7 @@ function! s:undotree.Render()
         endif
         if type(node) == TYPE_E
             let newmeta = node
+            let seq2index[node.seq]=len(out)
             for i in range(len(slots))
                 if index == i
                     "let newline = newline.(node.seq)." "
@@ -530,27 +703,8 @@ function! s:undotree.Render()
                     let newline = newline.'| '
                 endif
             endfor
-            " append meta info.
-            let padding = ''
-            let newline = newline . padding
-            if node.curpos
-                let newline = newline.'>'.(node.seq).'< '.
-                            \s:gettime(node.time)
-                let self.currentIndex = len(out) + 1 "index from zero.
-            else
-                if node.newhead
-                    let newline = newline.'['.(node.seq).'] '.
-                                \s:gettime(node.time)
-                else
-                    if node.curhead
-                        let newline = newline.'{'.(node.seq).'} '.
-                                    \s:gettime(node.time)
-                    else
-                        let newline = newline.' '.(node.seq).'  '.
-                                    \s:gettime(node.time)
-                    endif
-                endif
-            endif
+            let newline = newline.' '.(node.seq).'  '.
+                        \s:gettime(node.time)
             " update the printed slot to its child.
             if len(node.p) == 0
                 let slots[index] = 'x'
@@ -601,44 +755,162 @@ function! s:undotree.Render()
     endwhile
     let self.asciitree = out
     let self.asciimeta = outmeta
-    let self.currentIndex = len(out) - self.currentIndex
+    " revert index.
+    let totallen = len(out)
+    for i in keys(seq2index)
+        let seq2index[i] = totallen - 1 - seq2index[i]
+    endfor
+    let self.seq2index = seq2index
 endfunction
 
 "=================================================
-" It will set the target of undotree window to the current editing buffer.
-function! UndotreeUpdate()
-    call s:log(">>>>>>> UndotreeUpdate()")
-    if type(gettabvar(tabpagenr(),'undotree')) != type(s:undotree)
-        return
+"diff panel
+let s:diffpanel = s:new(s:panel)
+
+function! s:diffpanel.Update(seq,targetBufname)
+    call s:log('diffpanel.Update(),seq:'.a:seq.' bufname:'.a:targetBufname)
+    " TODO check seq if cache hit.
+    let diffresult = []
+
+    if a:seq == 0
+        let diffresult = []
+    else
+        if has_key(self.cache,a:targetBufname.a:seq)
+            call s:log("diff cache hit.")
+            let diffresult = self.cache[a:targetBufname.a:seq]
+        else
+            let ei_bak = &eventignore
+            set eventignore=all
+
+            let winnr = bufwinnr(a:targetBufname)
+            if winnr == -1
+                return
+            else
+                exec winnr." wincmd w"
+            endif
+            " remember and restore cursor and window position.
+            let cursorPos = getpos('.')
+            call s:exec('normal! H')
+            let topPos = getpos('.')
+
+            let new = getbufline(a:targetBufname,'^','$')
+            silent undo
+            let old = getbufline(a:targetBufname,'^','$')
+            silent redo
+
+            call setpos('.',topPos)
+            normal! zt
+            call setpos('.',cursorPos)
+
+            " diff files.
+            let tempfile1 = tempname()
+            let tempfile2 = tempname()
+            if writefile(old,tempfile1) == -1
+                echoerr "Can not write to temp file:".tempfile1
+            endif
+            if writefile(new,tempfile2) == -1
+                echoerr "Can not write to temp file:".tempfile2
+            endif
+            let diffresult = split(system('diff '.tempfile1.' '.tempfile2),"\n")
+            call s:log("diffresult: ".string(diffresult))
+            if delete(tempfile1) != 0
+                echoerr "Can not delete temp file:".tempfile1
+            endif
+            if delete(tempfile2) != 0
+                echoerr "Can not delete temp file:".tempfile2
+            endif
+            let &eventignore = ei_bak
+            "Update cache
+            let self.cache[a:targetBufname.a:seq] = diffresult
+        endif
     endif
-    if &bt != '' "it's nor a normal buffer, could be help, quickfix, etc.
-        return
-    endif
-    if mode() != 'n' "not in normal mode, return.
-        return
-    endif
-    if !t:undotree.IsVisible()
-        return
-    endif
-    call s:log(">>> UndotreeUpdate()")
-    call t:undotree.UpdateTarget()
+
+    call self.SetFocus()
+
+    setlocal modifiable
+    call s:exec('1,$ d _')
+
+    call append(0,diffresult)
+    call append(0,'- seq: '.a:seq.' -')
+
+    "remove the last empty line
+    call s:exec('$d _')
+    call s:exec('norm! gg') "move cursor to line 1.
+    setlocal nomodifiable
     call t:undotree.SetFocus()
-    call t:undotree.Update()
-    call t:undotree.RestoreFocus()
-    call s:log("<<< UndotreeUpdate() leave")
 endfunction
 
-function! UndotreeToggle()
-    call s:log(">>> UndotreeToggle()")
-    if type(gettabvar(tabpagenr(),'undotree')) != type(s:undotree)
-        let t:undotree = s:new(s:undotree)
+function! s:diffpanel.Init()
+    let self.bufname = "diffpanel_".s:cntr
+    let self.cache = {}
+    " Increase to make it unique.
+    let s:cntr = s:cntr + 1
+endfunction
+
+function! s:diffpanel.Toggle()
+    call s:log(self.bufname." Toggle()")
+    if self.IsVisible()
+        call self.Hide()
+    else
+        call self.Show()
     endif
-    call t:undotree.Toggle()
-    call s:log("<<< UndotreeToggle() leave")
 endfunction
 
-function! UndotreeAction(action)
-    call s:log("UndotreeAction()")
+function! s:diffpanel.Show()
+    call s:log("diffpanel.Show()")
+    if self.IsVisible()
+        return
+    endif
+    " Create diffpanel window.
+    call t:undotree.SetFocus() "can not exist without undotree
+    " remember and restore cursor and window position.
+    let cursorPos = getpos('.')
+    call s:exec('normal! H')
+    let topPos = getpos('.')
+
+    let sb_bak = &splitbelow
+    let ei_bak= &eventignore
+    set splitbelow
+    set eventignore=all
+
+    let cmd = g:undotree_diffpanelHeight.'new '.self.bufname
+    silent exec cmd
+
+    setlocal winfixwidth
+    setlocal winfixheight
+    setlocal noswapfile
+    setlocal buftype=nowrite
+    setlocal bufhidden=delete
+    setlocal nowrap
+    setlocal foldcolumn=0
+    setlocal nobuflisted
+    setlocal nospell
+    setlocal nonumber
+    setlocal nocursorline
+    setlocal nomodifiable
+
+    let &eventignore = ei_bak
+    let &splitbelow = sb_bak
+
+    " syntax need filetype autocommand
+    setfiletype diff
+    call self.BindAu()
+    call t:undotree.SetFocus()
+    call setpos('.',topPos)
+    normal! zt
+    call setpos('.',cursorPos)
+endfunction
+
+function! s:diffpanel.BindAu()
+    " Auto exit if it's the last window or undotree closed.
+    au WinEnter <buffer> if !t:undotree.IsTargetVisible() ||
+                \!t:undotree.IsVisible() |
+                \call t:undotree.Hide() | call t:diffpanel.Hide() | endif
+endfunction
+"=================================================
+" It will set the target of undotree window to the current editing buffer.
+function! s:undotreeAction(action)
+    call s:log("undotreeAction()")
     if type(gettabvar(tabpagenr(),'undotree')) != type(s:undotree)
         echoerr "Fatal: t:undotree does not exists!"
         return
@@ -646,15 +918,38 @@ function! UndotreeAction(action)
     call t:undotree.Action(a:action)
 endfunction
 
-function! UndotreeDebugon()
-    call s:debugon()
+"called outside undotree window
+function! UndotreeUpdate()
+    if type(gettabvar(tabpagenr(),'undotree')) != type(s:undotree)
+        return
+    endif
+    call s:log('>>> UndotreeUpdate()')
+    let thisbuf = bufname('%')
+    call t:undotree.Update()
+    " focus moved
+    if bufname('%') != thisbuf
+        call t:undotree.SetTargetFocus()
+    endif
+    call s:log('<<< UndotreeUpdate() leave')
 endfunction
 
-autocmd InsertEnter,InsertLeave,WinEnter,WinLeave,CursorMoved * call UndotreeUpdate()
+function! UndotreeToggle()
+    call s:log(">>> UndotreeToggle()")
+    if type(gettabvar(tabpagenr(),'undotree')) != type(s:undotree)
+        let t:undotree = s:new(s:undotree)
+        let t:diffpanel = s:new(s:diffpanel)
+    endif
+    call t:undotree.Toggle()
+    call s:log("<<< UndotreeToggle() leave")
+endfunction
+
+
+"let s:auEvents = "InsertEnter,InsertLeave,WinEnter,WinLeave,CursorMoved"
+let s:auEvents = "InsertLeave,CursorMoved"
+exec "au ".s:auEvents." * call UndotreeUpdate()"
 
 "=================================================
 " User commands.
 command! -n=0 -bar UndotreeToggle   :call UndotreeToggle()
-
 
 " vim: set et fdm=marker sts=4 sw=4:
