@@ -4,14 +4,19 @@
 " Author: Ming Bai <mbbill@gmail.com>
 " License: BSD
 
-" TODO remember split size.
 " TODO status line.
 " TODO Diff between 2 specific revisions.
-" TODO clear undo history.
+" TODO support horizontal split.
+" TODO Clear history from current seq.
 
 " At least version 7.0 is needed for undo branches.
 if v:version < 700
      finish
+endif
+
+" tree node shape.
+if !exists('g:undotree_TreeNodeShape')
+    let g:undotree_TreeNodeShape = '*'
 endif
 
 " split window location, could also be topright
@@ -21,7 +26,7 @@ endif
 
 " undotree window width
 if !exists('g:undotree_SplitWidth')
-    let g:undotree_SplitWidth = 28
+    let g:undotree_SplitWidth = 30
 endif
 
 " if set, let undotree window get focus after being opened, otherwise
@@ -31,13 +36,18 @@ if !exists('g:undotree_SetFocusWhenToggle')
 endif
 
 " diff window height
-if !exists('g:undotree_diffpanelHeight')
-    let g:undotree_diffpanelHeight = 10
+if !exists('g:undotree_DiffpanelHeight')
+    let g:undotree_DiffpanelHeight = 10
 endif
 
 " auto open diff window
-if !exists('g:undotree_diffAutoOpen')
-    let g:undotree_diffAutoOpen = 1
+if !exists('g:undotree_DiffAutoOpen')
+    let g:undotree_DiffAutoOpen = 1
+endif
+
+" relative timestamp
+if !exists('g:undotree_RelativeTimestamp')
+    let g:undotree_RelativeTimestamp = 1
 endif
 
 "=================================================
@@ -45,21 +55,28 @@ endif
 let s:cntr = 0
 
 " Help text
-let s:helpmore = ['" Undotree quick help',
-            \'" -------------------']
+let s:helpmore = ['"    ===== Marks ===== ',
+            \'" >num< : current change',
+            \'" {num} : change to redo',
+            \'" [num] : the last change',
+            \'"   s   : saved changes',
+            \'"   S   : last saved change',
+            \'"   ===== Hotkeys =====']
 let s:helpless = ['" Press ? for help.']
 
 " Keymap
 let s:keymap = []
 " action, key, help.
 let s:keymap += [['Help','?','Toggle quick help']]
+let s:keymap += [['ClearHistory','C','Clear undo history']]
+let s:keymap += [['TimestampToggle','T','Toggle relative timestamp']]
 let s:keymap += [['DiffToggle','D','Toggle diff panel']]
-let s:keymap += [['Goup','K','Revert to next state']]
-let s:keymap += [['Godown','J','Revert to previous state']]
+let s:keymap += [['GoNext','K','Revert to next state']]
+let s:keymap += [['GoPrevious','J','Revert to previous state']]
 let s:keymap += [['Redo','<c-r>','Redo']]
 let s:keymap += [['Undo','u','Undo']]
-let s:keymap += [['Enter','<2-LeftMouse>','Revert to current state']]
-let s:keymap += [['Enter','<cr>','Revert to current state']]
+let s:keymap += [['Enter','<2-LeftMouse>','Revert to current']]
+let s:keymap += [['Enter','<cr>','Revert to current']]
 
 function! s:new(obj)
     let newobj = deepcopy(a:obj)
@@ -70,13 +87,42 @@ endfunction
 " Get formatted time
 function! s:gettime(time)
     if a:time == 0
-        return "--------"
+        return "Original"
     endif
-    let today = substitute(strftime("%c",localtime())," .*$",'','g')
-    if today == substitute(strftime("%c",a:time)," .*$",'','g')
-        return strftime("%H:%M:%S",a:time)
+    if !g:undotree_RelativeTimestamp
+        let today = substitute(strftime("%c",localtime())," .*$",'','g')
+        if today == substitute(strftime("%c",a:time)," .*$",'','g')
+            return strftime("%H:%M:%S",a:time)
+        else
+            return strftime("%H:%M:%S %b%d %Y",a:time)
+        endif
     else
-        return strftime("%H:%M:%S %b%d %Y",a:time)
+        let sec = localtime() - a:time
+        if sec < 0
+            let sec = 0
+        endif
+        if sec < 60
+            if sec == 1
+                return '1 second ago'
+            else
+                return sec.' seconds ago'
+            endif
+        endif
+        if sec < 3600
+            if (sec/60) == 1
+                return '1 minute ago'
+            else
+                return (sec/60).' minutes ago'
+            endif
+        endif
+        if sec < 86400 "3600*24
+            if (sec/3600) == 1
+                return '1 hour ago'
+            else
+                return (sec/3600).' hours ago'
+            endif
+        endif
+        return (sec/86400).' days ago'
     endif
 endfunction
 
@@ -171,15 +217,19 @@ function! s:undotree.Init()
     " Increase to make it unique.
     let s:cntr = s:cntr + 1
     let self.width = g:undotree_SplitWidth
-    let self.targetBufname = ''
+    let self.opendiff = g:undotree_DiffAutoOpen
+    let self.targetBufnr = -1
     let self.rawtree = {}  "data passed from undotree()
     let self.tree = {}     "data converted to internal format.
     let self.seq_last = -1
+    let self.save_last = -1
+    let self.save_last_bak = -1
 
     " seqs
     let self.seq_cur = -1
     let self.seq_curhead = -1
     let self.seq_newhead = -1
+    let self.seq_saved = {} "{saved value -> seq} pair
 
     "backup, for mark
     let self.seq_cur_bak = -1
@@ -200,8 +250,11 @@ endfunction
 
 function! s:undotree.BindAu()
     " Auto exit if it's the last window
-    au WinEnter <buffer> if !t:undotree.IsTargetVisible() |
+    au Bufenter <buffer> if type(gettabvar(tabpagenr(),'undotree')) == type(s:undotree)
+                \&& !t:undotree.IsTargetVisible() |
                 \call t:undotree.Hide() | call t:diffpanel.Hide() | endif
+    au Bufenter <buffer> if type(gettabvar(tabpagenr(),'undotree')) == type(s:undotree) |
+                \let t:undotree.width = winwidth(winnr()) | endif
 endfunction
 
 function! s:undotree.Action(action)
@@ -258,19 +311,45 @@ function! s:undotree.ActionRedo()
     call self.ActionInTarget("redo")
 endfunction
 
-function! s:undotree.ActionGodown()
+function! s:undotree.ActionGoPrevious()
     call self.ActionInTarget('earlier')
 endfunction
 
-function! s:undotree.ActionGoup()
+function! s:undotree.ActionGoNext()
     call self.ActionInTarget('later')
 endfunction
 
 function! s:undotree.ActionDiffToggle()
+    let self.opendiff = !self.opendiff
     call t:diffpanel.Toggle()
-    if t:diffpanel.IsVisible()
-        call t:diffpanel.Update(self.seq_cur,self.targetBufname)
+    call self.UpdateDiff()
+endfunction
+
+function! s:undotree.ActionTimestampToggle()
+    if !self.SetTargetFocus()
+        return
     endif
+    let g:undotree_RelativeTimestamp = !g:undotree_RelativeTimestamp
+    let self.targetBufnr = -1 "force update
+    call self.Update()
+    " Update not always set current focus.
+    call self.SetFocus()
+endfunction
+
+function! s:undotree.ActionClearHistory()
+    if confirm("Are you sure to clear ALL undo history?","&Yes\n&No") != 1
+        return
+    endif
+    if !self.SetTargetFocus()
+        return
+    endif
+    let ul_bak = &undolevels
+    let &undolevels = -1
+    call s:exec("norm! a \<BS>\<Esc>")
+    let &undolevels = ul_bak
+    unlet ul_bak
+    let self.targetBufnr = -1 "force update
+    call self.Update()
 endfunction
 
 function! s:undotree.UpdateDiff()
@@ -278,21 +357,11 @@ function! s:undotree.UpdateDiff()
     if !t:diffpanel.IsVisible()
         return
     endif
-    let index = self.Screen2Index(line('.'))
-    if index < 0
-        return
-    endif
-    " -1: invalid node.
-    "  0: no parent node.
-    " >0: assume that seq>0 always has parent.
-    if (self.asciimeta[index].seq) < 0
-        return
-    endif
-    call t:diffpanel.Update(self.asciimeta[index].seq,self.targetBufname)
+    call t:diffpanel.Update(self.seq_cur,self.targetBufnr)
 endfunction
 
 function! s:undotree.IsTargetVisible()
-    if bufwinnr(self.targetBufname) != -1
+    if bufwinnr(self.targetBufnr) != -1
         return 1
     else
         return 0
@@ -301,8 +370,8 @@ endfunction
 
 " May fail due to target window closed.
 function! s:undotree.SetTargetFocus()
-    let winnr = bufwinnr(self.targetBufname)
-    call s:log("undotree.SetTargetFocus() winnr:".winnr." targetBufname:".self.targetBufname)
+    let winnr = bufwinnr(self.targetBufnr)
+    call s:log("undotree.SetTargetFocus() winnr:".winnr." targetBufname:".bufname(self.targetBufnr))
     if winnr == -1
         return 0
     else
@@ -328,7 +397,7 @@ function! s:undotree.Show()
     endif
 
     " store info for the first update.
-    let self.targetBufname = bufname('%')
+    let self.targetBufnr = bufnr('%')
     let self.rawtree = undotree()
     let self.seq_last = self.rawtree.seq_last
 
@@ -353,11 +422,14 @@ function! s:undotree.Show()
     call self.BindKey()
     call self.BindAu()
 
+    let self.seq_cur = -1
+    let self.seq_curhead = -1
+    let self.seq_newhead = -1
     call self.ConvertInput(1)
     call self.Render()
     call self.Draw()
     call self.MarkSeqs()
-    if g:undotree_diffAutoOpen
+    if self.opendiff
         call t:diffpanel.Show()
         call self.UpdateDiff()
     endif
@@ -381,7 +453,7 @@ function! s:undotree.Update()
         return
     endif
     "update undotree,set focus
-    if self.targetBufname == bufname('%')
+    if self.targetBufnr == bufnr('%')
         let newrawtree = undotree()
         if self.rawtree == newrawtree
             return
@@ -394,7 +466,8 @@ function! s:undotree.Update()
             call self.ConvertInput(0) "only update seqs.
             if (self.seq_cur == self.seq_cur_bak) &&
                         \(self.seq_curhead == self.seq_curhead_bak)&&
-                        \(self.seq_newhead == self.seq_newhead_bak)
+                        \(self.seq_newhead == self.seq_newhead_bak)&&
+                        \(self.save_last == self.save_last_bak)
                 return
             endif
             call self.SetFocus()
@@ -405,7 +478,7 @@ function! s:undotree.Update()
     endif
     call s:log("undotree.Update() update whole tree")
 
-    let self.targetBufname = bufname('%')
+    let self.targetBufnr = bufnr('%')
     let self.rawtree = undotree()
     let self.seq_last = self.rawtree.seq_last
     let self.seq_cur = -1
@@ -501,23 +574,38 @@ function! s:undotree.MarkSeqs()
         let index = self.seq2index[self.seq_newhead_bak]
         call setline(self.Index2Screen(index),self.asciitree[index])
     endif
+    " mark save seqs
+    for i in keys(self.seq_saved)
+        let index = self.seq2index[self.seq_saved[i]]
+        let lineNr = self.Index2Screen(index)
+        call setline(lineNr,substitute(self.asciitree[index],
+                    \' \d\+  \zs \ze','s',''))
+    endfor
+    let max_saved_num = max(keys(self.seq_saved))
+    if max_saved_num > 0
+        let lineNr = self.Index2Screen(self.seq2index[self.seq_saved[max_saved_num]])
+        call setline(lineNr,substitute(getline(lineNr),'s','S',''))
+    endif
     " mark new seqs.
     if self.seq_cur != -1
-        let lineNr = self.Index2Screen(self.seq2index[self.seq_cur])
+        let index = self.seq2index[self.seq_cur]
+        let lineNr = self.Index2Screen(index)
         call setline(lineNr,substitute(getline(lineNr),
-                    \' \(\d\+\) ','>\1<',''))
+                    \'\zs \(\d\+\) \ze [sS ] ','>\1<',''))
         " move cursor to that line.
         call s:exec("normal! " . lineNr . "G")
     endif
     if self.seq_curhead != -1
-        let lineNr = self.Index2Screen(self.seq2index[self.seq_curhead])
+        let index = self.seq2index[self.seq_curhead]
+        let lineNr = self.Index2Screen(index)
         call setline(lineNr,substitute(getline(lineNr),
-                    \' \(\d\+\) ','{\1}',''))
+                    \'\zs \(\d\+\) \ze [sS ] ','{\1}',''))
     endif
     if self.seq_newhead != -1
-        let lineNr = self.Index2Screen(self.seq2index[self.seq_newhead])
+        let index = self.seq2index[self.seq_newhead]
+        let lineNr = self.Index2Screen(index)
         call setline(lineNr,substitute(getline(lineNr),
-                    \' \(\d\+\) ','[\1]',''))
+                    \'\zs \(\d\+\) \ze [sS ] ','[\1]',''))
     endif
     setlocal nomodifiable
 endfunction
@@ -551,6 +639,9 @@ function! s:undotree._parseNode(in,out)
             let self.seq_curhead = i.seq
             let self.seq_cur = curnode.seq
         endif
+        if has_key(i,'save')
+            let self.seq_saved[i.save] = i.seq
+        endif
         call extend(curnode.p,[newnode])
         let curnode = newnode
     endfor
@@ -565,10 +656,12 @@ function! s:undotree.ConvertInput(updatetree)
     let self.seq_cur_bak = self.seq_cur
     let self.seq_curhead_bak = self.seq_curhead
     let self.seq_newhead_bak = self.seq_newhead
+    let self.save_last_bak = self.save_last
 
     let self.seq_cur = -1
     let self.seq_curhead = -1
     let self.seq_newhead = -1
+    let self.seq_saved = {}
 
     "Generate root node
     let root = s:new(s:node)
@@ -577,12 +670,17 @@ function! s:undotree.ConvertInput(updatetree)
 
     call self._parseNode(self.rawtree.entries,root)
 
+    let self.save_last = self.rawtree.save_last
     " Note: Normally, the current node should be the one that seq_cur points to,
     " but in fact it's not. May be bug, bug anyway I found a workaround:
     " first try to find the parent node of 'curhead', if not found, then use
     " seq_cur.
     if self.seq_cur == -1
         let self.seq_cur = self.rawtree.seq_cur
+    endif
+    " undo history is cleared
+    if len(self.rawtree.entries) == 0
+        let self.seq_cur = 0
     endif
     if a:updatetree
         let self.tree = root
@@ -697,14 +795,13 @@ function! s:undotree.Render()
             let seq2index[node.seq]=len(out)
             for i in range(len(slots))
                 if index == i
-                    "let newline = newline.(node.seq)." "
-                    let newline = newline.'* '
+                    let newline = newline.g:undotree_TreeNodeShape.' '
                 else
                     let newline = newline.'| '
                 endif
             endfor
-            let newline = newline.' '.(node.seq).'  '.
-                        \s:gettime(node.time)
+            let newline = newline.'   '.(node.seq).'    '.
+                        \'('.s:gettime(node.time).')'
             " update the printed slot to its child.
             if len(node.p) == 0
                 let slots[index] = 'x'
@@ -733,11 +830,11 @@ function! s:undotree.Render()
             call remove(slots,index)
             if len(node) == 2
                 if node[0].seq > node[1].seq
-                    call insert(slots,node[0],index)
                     call insert(slots,node[1],index)
+                    call insert(slots,node[0],index)
                 else
-                    call insert(slots,node[1],index)
                     call insert(slots,node[0],index)
+                    call insert(slots,node[1],index)
                 endif
             endif
             " split P to E+P if elements in p > 2
@@ -767,22 +864,24 @@ endfunction
 "diff panel
 let s:diffpanel = s:new(s:panel)
 
-function! s:diffpanel.Update(seq,targetBufname)
-    call s:log('diffpanel.Update(),seq:'.a:seq.' bufname:'.a:targetBufname)
-    " TODO check seq if cache hit.
+function! s:diffpanel.Update(seq,targetBufnr)
+    call s:log('diffpanel.Update(),seq:'.a:seq.' bufname:'.bufname(a:targetBufnr))
+    if !self.diffexecutable
+        return
+    endif
     let diffresult = []
 
     if a:seq == 0
         let diffresult = []
     else
-        if has_key(self.cache,a:targetBufname.a:seq)
+        if has_key(self.cache,a:targetBufnr.'_'.a:seq)
             call s:log("diff cache hit.")
-            let diffresult = self.cache[a:targetBufname.a:seq]
+            let diffresult = self.cache[a:targetBufnr.'_'.a:seq]
         else
             let ei_bak = &eventignore
             set eventignore=all
 
-            let winnr = bufwinnr(a:targetBufname)
+            let winnr = bufwinnr(a:targetBufnr)
             if winnr == -1
                 return
             else
@@ -793,9 +892,9 @@ function! s:diffpanel.Update(seq,targetBufname)
             call s:exec('normal! H')
             let topPos = getpos('.')
 
-            let new = getbufline(a:targetBufname,'^','$')
+            let new = getbufline(a:targetBufnr,'^','$')
             silent undo
-            let old = getbufline(a:targetBufname,'^','$')
+            let old = getbufline(a:targetBufnr,'^','$')
             silent redo
 
             call setpos('.',topPos)
@@ -821,7 +920,7 @@ function! s:diffpanel.Update(seq,targetBufname)
             endif
             let &eventignore = ei_bak
             "Update cache
-            let self.cache[a:targetBufname.a:seq] = diffresult
+            let self.cache[a:targetBufnr.'_'.a:seq] = diffresult
         endif
     endif
 
@@ -843,6 +942,10 @@ endfunction
 function! s:diffpanel.Init()
     let self.bufname = "diffpanel_".s:cntr
     let self.cache = {}
+    let self.diffexecutable = executable('diff')
+    if !self.diffexecutable
+        echoerr '"diff" is not executable.'
+    endif
     " Increase to make it unique.
     let s:cntr = s:cntr + 1
 endfunction
@@ -873,7 +976,7 @@ function! s:diffpanel.Show()
     set splitbelow
     set eventignore=all
 
-    let cmd = g:undotree_diffpanelHeight.'new '.self.bufname
+    let cmd = g:undotree_DiffpanelHeight.'new '.self.bufname
     silent exec cmd
 
     setlocal winfixwidth
@@ -903,8 +1006,9 @@ endfunction
 
 function! s:diffpanel.BindAu()
     " Auto exit if it's the last window or undotree closed.
-    au WinEnter <buffer> if !t:undotree.IsTargetVisible() ||
-                \!t:undotree.IsVisible() |
+    au Bufenter <buffer> if type(gettabvar(tabpagenr(),'undotree')) == type(s:undotree)
+                \&& (!t:undotree.IsTargetVisible() ||
+                \!t:undotree.IsVisible()) |
                 \call t:undotree.Hide() | call t:diffpanel.Hide() | endif
 endfunction
 "=================================================
@@ -923,14 +1027,12 @@ function! UndotreeUpdate()
     if type(gettabvar(tabpagenr(),'undotree')) != type(s:undotree)
         return
     endif
-    call s:log('>>> UndotreeUpdate()')
-    let thisbuf = bufname('%')
+    let thisbuf = bufnr('%')
     call t:undotree.Update()
     " focus moved
-    if bufname('%') != thisbuf
+    if bufnr('%') != thisbuf
         call t:undotree.SetTargetFocus()
     endif
-    call s:log('<<< UndotreeUpdate() leave')
 endfunction
 
 function! UndotreeToggle()
@@ -945,7 +1047,7 @@ endfunction
 
 
 "let s:auEvents = "InsertEnter,InsertLeave,WinEnter,WinLeave,CursorMoved"
-let s:auEvents = "InsertLeave,CursorMoved"
+let s:auEvents = "InsertLeave,CursorMoved,BufWritePost"
 exec "au ".s:auEvents." * call UndotreeUpdate()"
 
 "=================================================
