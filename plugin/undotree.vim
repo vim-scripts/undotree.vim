@@ -9,10 +9,18 @@
 " TODO support horizontal split.
 " TODO Clear history from current seq.
 
-" At least version 7.0 is needed for undo branches.
-if v:version < 700
-     finish
+" At least version 7.3 with 005 patch is needed for undo branches.
+" Refer to https://github.com/mbbill/undotree/issues/4 for details.
+" Thanks kien
+if v:version < 703
+    finish
 endif
+if (v:version == 703 && !has("patch005"))
+    finish
+endif
+
+"=================================================
+"Options:
 
 " tree node shape.
 if !exists('g:undotree_TreeNodeShape')
@@ -49,6 +57,26 @@ endif
 if !exists('g:undotree_RelativeTimestamp')
     let g:undotree_RelativeTimestamp = 1
 endif
+
+" Highlight changed text
+if !exists('g:undotree_HighlightChangedText')
+    let g:undotree_HighlightChangedText = 1
+endif
+
+" Highlight linked syntax type.
+" You may chose your favorite through ":hi" command
+if !exists('g:undotree_HighlightSyntax')
+    let g:undotree_HighlightSyntax = "UnderLined"
+endif
+
+"Custom key mappings: add this function to your vimrc.
+"You can define whatever mapping as you like, this is a hook function which
+"will be called after undotree window initialized.
+"
+"function g:undotree_CustomMap()
+"    map <c-n> J
+"    map <c-p> K
+"endfunction
 
 "=================================================
 " Golbal buf counter.
@@ -163,7 +191,6 @@ endfunction
 
 function! s:panel.SetFocus()
     let winnr = bufwinnr(self.bufname)
-    call s:log("SetFocus() winnr:".winnr." bufname:".self.bufname)
     " already focused.
     if winnr == winnr()
         return
@@ -172,6 +199,7 @@ function! s:panel.SetFocus()
         echoerr "Fatal: window does not exist!"
         return
     endif
+    call s:log("SetFocus() winnr:".winnr." bufname:".self.bufname)
     " wincmd would cause cursor outside window.
     call s:exec("norm! ".winnr."\<c-w>\<c-w>")
 endfunction
@@ -246,6 +274,9 @@ function! s:undotree.BindKey()
     for i in s:keymap
         silent exec 'nnoremap <silent> <script> <buffer> '.i[1].' :call <sid>undotreeAction("'.i[0].'")<cr>'
     endfor
+    if exists('*g:undotree_CustomMap')
+        call g:undotree_CustomMap()
+    endif
 endfunction
 
 function! s:undotree.BindAu()
@@ -281,8 +312,11 @@ function! s:undotree.ActionInTarget(cmd)
     if !self.SetTargetFocus()
         return
     endif
-    call s:exec(a:cmd)
-    call self.Update()
+    " Target should be a normal buffer.
+    if (&bt == '') && (&modifiable == 1) && (mode() == 'n')
+        call s:exec(a:cmd)
+        call self.Update()
+    endif
     " Update not always set current focus.
     call self.SetFocus()
 endfunction
@@ -397,9 +431,7 @@ function! s:undotree.Show()
     endif
 
     " store info for the first update.
-    let self.targetBufnr = bufnr('%')
-    let self.rawtree = undotree()
-    let self.seq_last = self.rawtree.seq_last
+    let targetBufnr = bufnr('%')
 
     " Create undotree window.
     let cmd = g:undotree_SplitLocation . " vertical" .
@@ -422,17 +454,12 @@ function! s:undotree.Show()
     call self.BindKey()
     call self.BindAu()
 
-    let self.seq_cur = -1
-    let self.seq_curhead = -1
-    let self.seq_newhead = -1
-    call self.ConvertInput(1)
-    call self.Render()
-    call self.Draw()
-    call self.MarkSeqs()
     if self.opendiff
         call t:diffpanel.Show()
-        call self.UpdateDiff()
     endif
+    call s:exec("norm! ".bufwinnr(targetBufnr)."\<c-w>\<c-w>")
+    let self.targetBufnr = -1 "force update
+    call self.Update()
     if !g:undotree_SetFocusWhenToggle
         call self.SetTargetFocus()
     endif
@@ -440,46 +467,53 @@ endfunction
 
 " called outside undotree window
 function! s:undotree.Update()
-    if &bt != '' "it's nor a normal buffer, could be help, quickfix, etc.
-        return
-    endif
-    if &modifiable == 0 "no modifiable buffer.
-        return
-    endif
-    if mode() != 'n' "not in normal mode, return.
-        return
-    endif
     if !self.IsVisible()
         return
     endif
-    "update undotree,set focus
-    if self.targetBufnr == bufnr('%')
-        let newrawtree = undotree()
-        if self.rawtree == newrawtree
+    let bufname = bufname('%')
+    if bufname == self.bufname || bufname == t:diffpanel.bufname
+        return
+    endif
+    if (&bt != '') || (&modifiable == 0) || (mode() != 'n')
+        if self.targetBufnr == bufnr('%')
             return
         endif
-
-        " same buffer, but seq changed.
-        if newrawtree.seq_last == self.seq_last
-            call s:log("undotree.Update() update seqs")
-            let self.rawtree = newrawtree
-            call self.ConvertInput(0) "only update seqs.
-            if (self.seq_cur == self.seq_cur_bak) &&
-                        \(self.seq_curhead == self.seq_curhead_bak)&&
-                        \(self.seq_newhead == self.seq_newhead_bak)&&
-                        \(self.save_last == self.save_last_bak)
+        let emptybuf = 1 "This is not a valid buffer.
+    else
+        let emptybuf = 0
+        "update undotree,set focus
+        if self.targetBufnr == bufnr('%')
+            let newrawtree = undotree()
+            if self.rawtree == newrawtree
                 return
             endif
-            call self.SetFocus()
-            call self.MarkSeqs()
-            call self.UpdateDiff()
-            return
+
+            " same buffer, but seq changed.
+            if newrawtree.seq_last == self.seq_last
+                call s:log("undotree.Update() update seqs")
+                let self.rawtree = newrawtree
+                call self.ConvertInput(0) "only update seqs.
+                if (self.seq_cur == self.seq_cur_bak) &&
+                            \(self.seq_curhead == self.seq_curhead_bak)&&
+                            \(self.seq_newhead == self.seq_newhead_bak)&&
+                            \(self.save_last == self.save_last_bak)
+                    return
+                endif
+                call self.SetFocus()
+                call self.MarkSeqs()
+                call self.UpdateDiff()
+                return
+            endif
         endif
     endif
     call s:log("undotree.Update() update whole tree")
 
     let self.targetBufnr = bufnr('%')
-    let self.rawtree = undotree()
+    if emptybuf " Show an empty undo tree instead of do nothing.
+        let self.rawtree = {'seq_last':0,'entries':[],'time_cur':0,'save_last':0,'synced':1,'save_cur':0,'seq_cur':0}
+    else
+        let self.rawtree = undotree()
+    endif
     let self.seq_last = self.rawtree.seq_last
     let self.seq_cur = -1
     let self.seq_curhead = -1
@@ -529,9 +563,7 @@ endfunction
 " Current window must be undotree.
 function! s:undotree.Draw()
     " remember the current cursor position.
-    let cursorPos = getpos('.') "position of cursor
-    call s:exec('normal! H')
-    let topPos = getpos('.') "position of the first line in screen.
+    let savedview = winsaveview()
 
     setlocal modifiable
     " Delete text into blackhole register.
@@ -544,9 +576,7 @@ function! s:undotree.Draw()
     call s:exec('$d _')
 
     " restore previous cursor position.
-    call setpos('.',topPos)
-    normal! zt
-    call setpos('.',cursorPos)
+    call winrestview(savedview)
 
     setlocal nomodifiable
 endfunction
@@ -621,7 +651,7 @@ endfunction
 
 function! s:undotree._parseNode(in,out)
     " type(in) == type([]) && type(out) == type({})
-    if len(a:in) == 0 "empty
+    if empty(a:in) "empty
         return
     endif
     let curnode = a:out
@@ -679,7 +709,7 @@ function! s:undotree.ConvertInput(updatetree)
         let self.seq_cur = self.rawtree.seq_cur
     endif
     " undo history is cleared
-    if len(self.rawtree.entries) == 0
+    if empty(self.rawtree.entries)
         let self.seq_cur = 0
     endif
     if a:updatetree
@@ -773,7 +803,8 @@ function! s:undotree.Render()
         endif
 
         " output.
-        let newline = " "
+        let onespace = " "
+        let newline = onespace
         let newmeta = {}
         let node = slots[index]
         if type(node) == TYPE_X
@@ -803,7 +834,7 @@ function! s:undotree.Render()
             let newline = newline.'   '.(node.seq).'    '.
                         \'('.s:gettime(node.time).')'
             " update the printed slot to its child.
-            if len(node.p) == 0
+            if empty(node.p)
                 let slots[index] = 'x'
             endif
             if len(node.p) == 1 "only one child.
@@ -845,7 +876,8 @@ function! s:undotree.Render()
             endif
         endif
         unlet node
-        if newline != " "
+        if newline != onespace
+            let newline = substitute(newline,'\s*$','','g') "remove trailing space.
             call insert(out,newline,0)
             call insert(outmeta,newmeta,0)
         endif
@@ -888,18 +920,14 @@ function! s:diffpanel.Update(seq,targetBufnr)
                 exec winnr." wincmd w"
             endif
             " remember and restore cursor and window position.
-            let cursorPos = getpos('.')
-            call s:exec('normal! H')
-            let topPos = getpos('.')
+            let savedview = winsaveview()
 
             let new = getbufline(a:targetBufnr,'^','$')
             silent undo
             let old = getbufline(a:targetBufnr,'^','$')
             silent redo
 
-            call setpos('.',topPos)
-            normal! zt
-            call setpos('.',cursorPos)
+            call winrestview(savedview)
 
             " diff files.
             let tempfile1 = tempname()
@@ -924,6 +952,10 @@ function! s:diffpanel.Update(seq,targetBufnr)
         endif
     endif
 
+    if g:undotree_HighlightChangedText
+        call self.HighlightDiff(diffresult,a:targetBufnr)
+    endif
+
     call self.SetFocus()
 
     setlocal modifiable
@@ -939,9 +971,46 @@ function! s:diffpanel.Update(seq,targetBufnr)
     call t:undotree.SetFocus()
 endfunction
 
+function! s:diffpanel.HighlightDiff(diffresult,targetBufnr)
+    " set target focus first.
+    let winnr = bufwinnr(a:targetBufnr)
+    if winnr != winnr()
+        call s:exec("norm! ".winnr."\<c-w>\<c-w>")
+    endif
+
+    if empty(a:diffresult)
+        return
+    endif
+    exec "hi link UndotreeChangedText ".g:undotree_HighlightSyntax
+    " clear previous highlighted syntax
+    if has_key(self.diffmatches,a:targetBufnr)
+        for i in self.diffmatches[a:targetBufnr]
+            call matchdelete(i)
+        endfor
+    endif
+    let self.diffmatches[a:targetBufnr] = []
+    let lineNr = 0
+    for line in a:diffresult
+        let matchnum = matchstr(line,'^[0-9,\,]*[ac]\zs\d*\ze')
+        if !empty(matchnum)
+            let lineNr = str2nr(matchnum)
+            continue
+        endif
+        let matchtext = matchstr(line,'^> \zs.*$')
+        if empty(matchtext)
+            continue
+        endif
+        let matchtext = '\%'.lineNr.'l\V'.escape(matchtext,'"\')
+        call add(self.diffmatches[a:targetBufnr]
+                    \,matchadd("UndotreeChangedText",matchtext))
+        let lineNr = lineNr+1
+    endfor
+endfunction
+
 function! s:diffpanel.Init()
     let self.bufname = "diffpanel_".s:cntr
     let self.cache = {}
+    let self.diffmatches = {}  " {bufnr1:[match1,match2,...],bufnr2:[...]}
     let self.diffexecutable = executable('diff')
     if !self.diffexecutable
         echoerr '"diff" is not executable.'
@@ -967,9 +1036,7 @@ function! s:diffpanel.Show()
     " Create diffpanel window.
     call t:undotree.SetFocus() "can not exist without undotree
     " remember and restore cursor and window position.
-    let cursorPos = getpos('.')
-    call s:exec('normal! H')
-    let topPos = getpos('.')
+    let savedview = winsaveview()
 
     let sb_bak = &splitbelow
     let ei_bak= &eventignore
@@ -999,9 +1066,7 @@ function! s:diffpanel.Show()
     setfiletype diff
     call self.BindAu()
     call t:undotree.SetFocus()
-    call setpos('.',topPos)
-    normal! zt
-    call setpos('.',cursorPos)
+    call winrestview(savedview)
 endfunction
 
 function! s:diffpanel.BindAu()

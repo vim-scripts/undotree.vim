@@ -1,7 +1,10 @@
 ### [Link to Vim.org](http://www.vim.org/scripts/script.php?script_id=4177)
 
+### Screenshot
+![](http://files.myopera.com/mbbill/files/undotree.png)
+
 ### Description
-Vim 7.0 added a new feature named **Undo branches**. Basically it's a kind of ability to go back to the text after any change, even if they were undone. Vim stores undo history in a tree which you can browse and manipulate through a bunch of commands. But that was not enough straightforward and a bit hard to use. You may use `:help new-undo-branches` or `:help undo-tree` to get more detailed help.  
+Vim 7.0 added a new feature named **Undo branches**. Basically it's a kind of ability to go back to the text after any change, even if they were undone. Vim stores undo history in a tree which you can browse and manipulate through a bunch of commands. But that was not enough straightforward and a bit hard to use. You may use `:help new-undo-branches` or `:help undo-tree` to get more detailed help.
 Now this plug-in will free you from those commands and bring back the power of undo tree.
 
 ### Features
@@ -12,6 +15,8 @@ Now this plug-in will free you from those commands and bring back the power of u
     * The next change that will be restored by `:redo` or `<ctrl-r>` is marked as **{seq}**, it's the same as *curhead* returned by *undotree()*
     * The **[seq]** marks the last change and where further changes will be added, it's the same as *newhead* returned by *undotree()*
     * Saved changes are marked as **s** and the current change is **S**
+ 1. Live updated diff panel.
+ 1. Highlight changed text.
  1. Revert to a specific change by mouse click or enter key.
  1. Hotkey support.
  1. Display changes in diff panel.
@@ -42,12 +47,10 @@ Add the following line to your *vimrc* in order to make them stored together.
 
 ### Configuration
  1. Basically, you do not need any configuration to let it work, cool?
- 1. But if you still want to do some customization, there is also a bunch of options provided. Open the *undotree.vim* to find them out since they're changed rapidly now.
+ 1. But if you still want to do some customization, there is also a couple of options provided.
+    * [Here](https://github.com/mbbill/undotree/blob/master/plugin/undotree.vim#L15) is a list of these options.
 
-### Screenshot
-![](http://files.myopera.com/mbbill/files/undotree.png)
-
-### For any Issues
+### Post any issue and feature request here:
 https://github.com/mbbill/undotree/issues
 
 ### Debug
@@ -56,6 +59,16 @@ https://github.com/mbbill/undotree/issues
  1. Run vim, and the log will automatically be appended to the file, and you may watch it using `tail`:
     * `$tail -F ~/undotree_debug.log`
  1. If you want to disable debug, just delete that file.
+
+### Alternatives
+Someone asked me about the difference with [Gundo](http://sjl.bitbucket.org/gundo.vim/), here is a list of differences, or advantages.
+ 1. Pure vimscript implementation and no 3rd-party libraries(like python) is needed, don't worry about performance, it's not such a big deal for vim to handle this. The only dependency is the 'diff' tool which always shipped with vim and even without 'diff' you still can use most of the features of this script.
+ 1. Realtime updated undo tree. Once you make changes, the undo tree will be updated simultaneously.
+ 1. Several useful marks, like current changeset, next redo changeset, saved changeset, etc.
+ 1. Toggle between relative timestamp and absolute timestamp.
+ 1. Realtime updated undo window.
+ 1. Ability to clear undo history.
+ 1. More customizable.
 
 ### License
 **BSD**
