@@ -7,7 +7,6 @@
 " TODO status line.
 " TODO Diff between 2 specific revisions.
 " TODO support horizontal split.
-" TODO Clear history from current seq.
 
 " At least version 7.3 with 005 patch is needed for undo branches.
 " Refer to https://github.com/mbbill/undotree/issues/4 for details.
@@ -247,6 +246,7 @@ function! s:undotree.Init()
     let self.width = g:undotree_SplitWidth
     let self.opendiff = g:undotree_DiffAutoOpen
     let self.targetBufnr = -1
+    let self.targetWinnr = -1
     let self.rawtree = {}  "data passed from undotree()
     let self.tree = {}     "data converted to internal format.
     let self.seq_last = -1
@@ -281,11 +281,14 @@ endfunction
 
 function! s:undotree.BindAu()
     " Auto exit if it's the last window
-    au Bufenter <buffer> if type(gettabvar(tabpagenr(),'undotree')) == type(s:undotree)
-                \&& !t:undotree.IsTargetVisible() |
-                \call t:undotree.Hide() | call t:diffpanel.Hide() | endif
-    au Bufenter <buffer> if type(gettabvar(tabpagenr(),'undotree')) == type(s:undotree) |
-                \let t:undotree.width = winwidth(winnr()) | endif
+    augroup Undotree_Main
+        au!
+        au Bufenter <buffer> if type(gettabvar(tabpagenr(),'undotree')) == type(s:undotree)
+                    \&& !t:undotree.IsTargetVisible() |
+                    \call t:undotree.Hide() | call t:diffpanel.Hide() | endif
+        au Bufenter <buffer> if type(gettabvar(tabpagenr(),'undotree')) == type(s:undotree) |
+                    \let t:undotree.width = winwidth(winnr()) | endif
+    augroup end
 endfunction
 
 function! s:undotree.Action(action)
@@ -391,7 +394,7 @@ function! s:undotree.UpdateDiff()
     if !t:diffpanel.IsVisible()
         return
     endif
-    call t:diffpanel.Update(self.seq_cur,self.targetBufnr)
+    call t:diffpanel.Update(self.seq_cur,self.targetBufnr,self.targetWinnr)
 endfunction
 
 function! s:undotree.IsTargetVisible()
@@ -404,7 +407,12 @@ endfunction
 
 " May fail due to target window closed.
 function! s:undotree.SetTargetFocus()
-    let winnr = bufwinnr(self.targetBufnr)
+    " First, try winnr. otherwise find the first window with buffer.
+    if winbufnr(self.targetWinnr) == self.targetBufnr
+        let winnr = self.targetWinnr
+    else
+        let winnr = bufwinnr(self.targetBufnr)
+    endif
     call s:log("undotree.SetTargetFocus() winnr:".winnr." targetBufname:".bufname(self.targetBufnr))
     if winnr == -1
         return 0
@@ -424,6 +432,20 @@ function! s:undotree.Toggle()
     endif
 endfunction
 
+function! s:undotree.GetStatusLine()
+    if self.seq_cur != -1
+        let seq_cur = self.seq_cur
+    else
+        let seq_cur = 'None'
+    endif
+    if self.seq_curhead != -1
+        let seq_curhead = self.seq_curhead
+    else
+        let seq_curhead = 'None'
+    endif
+    return 'current: '.seq_cur.' redo: '.seq_curhead
+endfunction
+
 function! s:undotree.Show()
     call s:log("undotree.Show()")
     if self.IsVisible()
@@ -431,6 +453,8 @@ function! s:undotree.Show()
     endif
 
     " store info for the first update.
+    " TODO here, it is still possible to find an other window by mistake chich
+    " contains the same buffer.
     let targetBufnr = bufnr('%')
 
     " Create undotree window.
@@ -449,6 +473,7 @@ function! s:undotree.Show()
     setlocal nonumber
     setlocal cursorline
     setlocal nomodifiable
+    setlocal statusline=%!t:undotree.GetStatusLine()
     setfiletype undotree
 
     call self.BindKey()
@@ -475,14 +500,15 @@ function! s:undotree.Update()
         return
     endif
     if (&bt != '') || (&modifiable == 0) || (mode() != 'n')
-        if self.targetBufnr == bufnr('%')
+        if self.targetBufnr == bufnr('%') && self.targetWinnr == winnr()
             return
         endif
-        let emptybuf = 1 "This is not a valid buffer.
+        let emptybuf = 1 "This is not a valid buffer, could be help or something.
     else
         let emptybuf = 0
         "update undotree,set focus
         if self.targetBufnr == bufnr('%')
+            let self.targetWinnr = winnr()
             let newrawtree = undotree()
             if self.rawtree == newrawtree
                 return
@@ -509,6 +535,7 @@ function! s:undotree.Update()
     call s:log("undotree.Update() update whole tree")
 
     let self.targetBufnr = bufnr('%')
+    let self.targetWinnr = winnr()
     if emptybuf " Show an empty undo tree instead of do nothing.
         let self.rawtree = {'seq_last':0,'entries':[],'time_cur':0,'save_last':0,'synced':1,'save_cur':0,'seq_cur':0}
     else
@@ -768,7 +795,7 @@ function! s:undotree.Render()
         "find next node
         let foundx = 0 " 1 if x element is found.
         let index = 0 " Next element to be print.
-    
+
         " Find x element first.
         for i in range(len(slots))
             if type(slots[i]) == TYPE_X
@@ -777,16 +804,18 @@ function! s:undotree.Render()
                 break
             endif
         endfor
-    
+
         " Then, find the element with minimun seq.
+        let minseq = 99999999
+        let minnode = {}
         if foundx == 0
             "assume undo level isn't more than this... of course
-            let minseq = 99999999
             for i in range(len(slots))
                 if type(slots[i]) == TYPE_E
                     if slots[i].seq < minseq
                         let minseq = slots[i].seq
                         let index = i
+                        let minnode = slots[i]
                         continue
                     endif
                 endif
@@ -795,6 +824,7 @@ function! s:undotree.Render()
                         if j.seq < minseq
                             let minseq = j.seq
                             let index = i
+                            let minnode = j
                             continue
                         endif
                     endfor
@@ -870,9 +900,9 @@ function! s:undotree.Render()
             endif
             " split P to E+P if elements in p > 2
             if len(node) > 2
-                call insert(slots,node[0],index)
-                call remove(node,0)
-                call insert(slots,node,index+1)
+                call remove(node,index(node,minnode))
+                call insert(slots,minnode,index)
+                call insert(slots,node,index)
             endif
         endif
         unlet node
@@ -896,7 +926,7 @@ endfunction
 "diff panel
 let s:diffpanel = s:new(s:panel)
 
-function! s:diffpanel.Update(seq,targetBufnr)
+function! s:diffpanel.Update(seq,targetBufnr,targetWinnr)
     call s:log('diffpanel.Update(),seq:'.a:seq.' bufname:'.bufname(a:targetBufnr))
     if !self.diffexecutable
         return
@@ -913,7 +943,11 @@ function! s:diffpanel.Update(seq,targetBufnr)
             let ei_bak = &eventignore
             set eventignore=all
 
-            let winnr = bufwinnr(a:targetBufnr)
+            if winbufnr(a:targetWinnr) == a:targetBufnr
+                let winnr = a:targetWinnr
+            else
+                let winnr = bufwinnr(a:targetBufnr)
+            endif
             if winnr == -1
                 return
             else
@@ -953,7 +987,7 @@ function! s:diffpanel.Update(seq,targetBufnr)
     endif
 
     if g:undotree_HighlightChangedText
-        call self.HighlightDiff(diffresult,a:targetBufnr)
+        call self.HighlightDiff(diffresult)
     endif
 
     call self.SetFocus()
@@ -971,24 +1005,22 @@ function! s:diffpanel.Update(seq,targetBufnr)
     call t:undotree.SetFocus()
 endfunction
 
-function! s:diffpanel.HighlightDiff(diffresult,targetBufnr)
+function! s:diffpanel.HighlightDiff(diffresult)
     " set target focus first.
-    let winnr = bufwinnr(a:targetBufnr)
-    if winnr != winnr()
-        call s:exec("norm! ".winnr."\<c-w>\<c-w>")
-    endif
+    call t:undotree.SetTargetFocus()
 
     if empty(a:diffresult)
         return
     endif
     exec "hi link UndotreeChangedText ".g:undotree_HighlightSyntax
     " clear previous highlighted syntax
-    if has_key(self.diffmatches,a:targetBufnr)
-        for i in self.diffmatches[a:targetBufnr]
+    " matchadd associates with windows.
+    if exists("w:undotree_diffmatches")
+        for i in w:undotree_diffmatches
             call matchdelete(i)
         endfor
     endif
-    let self.diffmatches[a:targetBufnr] = []
+    let w:undotree_diffmatches = []
     let lineNr = 0
     for line in a:diffresult
         let matchnum = matchstr(line,'^[0-9,\,]*[ac]\zs\d*\ze')
@@ -996,13 +1028,15 @@ function! s:diffpanel.HighlightDiff(diffresult,targetBufnr)
             let lineNr = str2nr(matchnum)
             continue
         endif
-        let matchtext = matchstr(line,'^> \zs.*$')
+        let matchtext = matchstr(line,'^>\zs .*$')
         if empty(matchtext)
             continue
         endif
-        let matchtext = '\%'.lineNr.'l\V'.escape(matchtext,'"\')
-        call add(self.diffmatches[a:targetBufnr]
-                    \,matchadd("UndotreeChangedText",matchtext))
+        if matchtext != ' '
+            let matchtext = '\%'.lineNr.'l\V'.escape(matchtext[1:],'"\') "remove beginning space.
+            call s:log("matchadd() ->  ".matchtext)
+            call add(w:undotree_diffmatches,matchadd("UndotreeChangedText",matchtext))
+        endif
         let lineNr = lineNr+1
     endfor
 endfunction
@@ -1010,7 +1044,6 @@ endfunction
 function! s:diffpanel.Init()
     let self.bufname = "diffpanel_".s:cntr
     let self.cache = {}
-    let self.diffmatches = {}  " {bufnr1:[match1,match2,...],bufnr2:[...]}
     let self.diffexecutable = executable('diff')
     if !self.diffexecutable
         echoerr '"diff" is not executable.'
@@ -1071,10 +1104,46 @@ endfunction
 
 function! s:diffpanel.BindAu()
     " Auto exit if it's the last window or undotree closed.
-    au Bufenter <buffer> if type(gettabvar(tabpagenr(),'undotree')) == type(s:undotree)
-                \&& (!t:undotree.IsTargetVisible() ||
-                \!t:undotree.IsVisible()) |
-                \call t:undotree.Hide() | call t:diffpanel.Hide() | endif
+    augroup Undotree_Diff
+        au!
+        au Bufenter <buffer> if type(gettabvar(tabpagenr(),'undotree')) == type(s:undotree)
+                    \&& (!t:undotree.IsTargetVisible() ||
+                    \!t:undotree.IsVisible()) |
+                    \call t:undotree.Hide() | call t:diffpanel.Hide() | endif
+    augroup end
+endfunction
+
+function! s:diffpanel.CleanUpHighlight()
+    call s:log("CleanUpHighlight()")
+    " save current position
+    let curwinnr = winnr()
+    let savedview = winsaveview()
+
+    " clear w:undotree_diffmatches in all windows.
+    let winnum = tabpagewinnr(tabpagenr(),'$')
+    for i in range(winnum)
+        call s:exec("norm! ".(i+1)."\<c-w>\<c-w>")
+        if exists("w:undotree_diffmatches")
+            for j in w:undotree_diffmatches
+                call matchdelete(j)
+            endfor
+            let w:undotree_diffmatches = []
+        endif
+    endfor
+
+    "restore position
+    call s:exec("norm! ".curwinnr."\<c-w>\<c-w>")
+    call winrestview(savedview)
+endfunction
+
+function! s:diffpanel.Hide()
+    call s:log(self.bufname." Hide()")
+    if !self.IsVisible()
+        return
+    endif
+    call self.SetFocus()
+    call s:exec("quit")
+    call self.CleanUpHighlight()
 endfunction
 "=================================================
 " It will set the target of undotree window to the current editing buffer.
